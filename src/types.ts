@@ -29,13 +29,28 @@ export interface Env {
 }
 
 /**
+ * Relationship for deduplication context
+ */
+export interface EntityRelationship {
+  predicate: string;
+  peer: string;
+  peer_label?: string;
+  peer_type?: string;
+}
+
+/**
  * Entity information for deduplication comparison
+ * Supports both minimal (label/type) and full (properties/relationships) modes
  */
 export interface EntityInfo {
   id: string;
   label: string;
   type: string;
   description?: string;
+  /** All properties (when using full mode) */
+  properties?: Record<string, unknown>;
+  /** Relationships with other entities (when using full mode) */
+  relationships?: EntityRelationship[];
 }
 
 /**
@@ -75,4 +90,8 @@ export interface DedupeProperties {
   indexing_delay_ms?: number;
   /** Confidence threshold for accepting duplicates (default: 0.7) */
   confidence_threshold?: number;
+  /** Include full properties in judge context (default: true) */
+  include_properties?: boolean;
+  /** Include relationships in judge context (default: true) */
+  include_relationships?: boolean;
 }

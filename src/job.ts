@@ -5,7 +5,7 @@
 import type { ArkeClient } from '@arke-institute/sdk';
 import type { KladosRequest, KladosLogger, Output } from '@arke-institute/rhiza';
 import { judgeBatch } from './judge';
-import type { Env, EntityInfo, DedupeProperties } from './types';
+import type { Env, EntityInfo, EntityRelationship, DedupeProperties } from './types';
 
 /**
  * Context passed to the job processor
@@ -50,6 +50,8 @@ export async function processJob(ctx: ProcessContext): Promise<ProcessResult> {
   }
 
   const props = (request.input || {}) as DedupeProperties;
+  const includeProperties = props.include_properties !== false; // default true
+  const includeRelationships = props.include_relationships !== false; // default true
 
   // Step 1: Optional indexing delay
   const delay = props.indexing_delay_ms ?? 30000;
@@ -68,6 +70,7 @@ export async function processJob(ctx: ProcessContext): Promise<ProcessResult> {
     throw new Error(`Entity ${entityId} not found: ${entityError?.error || 'unknown error'}`);
   }
 
+  // Build source entity info with full context
   const source: EntityInfo = {
     id: entity.id,
     label: (entity.properties?.label as string) || entity.id,
@@ -75,9 +78,28 @@ export async function processJob(ctx: ProcessContext): Promise<ProcessResult> {
     description: entity.properties?.description as string | undefined,
   };
 
+  // Include full properties if enabled
+  if (includeProperties && entity.properties) {
+    source.properties = entity.properties as Record<string, unknown>;
+  }
+
+  // Include relationships if enabled
+  if (includeRelationships && entity.relationships) {
+    source.relationships = (entity.relationships as Array<{
+      predicate: string;
+      peer: string;
+      peer_type?: string;
+    }>).map(r => ({
+      predicate: r.predicate,
+      peer: r.peer,
+      peer_type: r.peer_type,
+    }));
+  }
+
   logger.info('Processing entity', { label: source.label, type: source.type });
 
   // Step 3: Semantic search (top 11 to account for self, no type filter)
+  // Use expand: "full" to get complete entity data for better disambiguation
   const searchQuery = `${source.label} ${source.description || ''}`.trim();
 
   const searchResponse = await (client.api.POST as Function)('/search/entities', {
@@ -85,7 +107,7 @@ export async function processJob(ctx: ProcessContext): Promise<ProcessResult> {
       collection_id: collectionId,
       query: searchQuery,
       limit: 11,
-      expand: 'preview',
+      expand: 'full',
     },
   });
 
@@ -93,17 +115,43 @@ export async function processJob(ctx: ProcessContext): Promise<ProcessResult> {
     throw new Error(`Semantic search failed: ${JSON.stringify(searchResponse.error)}`);
   }
 
-  // Step 4: Filter out self, build candidate list (max 10)
+  // Step 4: Filter out self, build candidate list (max 10) with full context
   const results = searchResponse.data?.results || [];
   const candidates: EntityInfo[] = results
     .filter((r: { id: string }) => r.id !== entityId)
     .slice(0, 10)
-    .map((r: { id: string; label: string; type: string; entity_preview?: { properties?: { description?: string } } }) => ({
-      id: r.id,
-      label: r.label,
-      type: r.type,
-      description: r.entity_preview?.properties?.description as string | undefined,
-    }));
+    .map((r: {
+      id: string;
+      label: string;
+      type: string;
+      entity?: {
+        properties?: Record<string, unknown>;
+        relationships?: Array<{ predicate: string; peer: string; peer_type?: string }>;
+      };
+    }) => {
+      const candidate: EntityInfo = {
+        id: r.id,
+        label: r.label,
+        type: r.type,
+        description: r.entity?.properties?.description as string | undefined,
+      };
+
+      // Include full properties if available and enabled
+      if (includeProperties && r.entity?.properties) {
+        candidate.properties = r.entity.properties;
+      }
+
+      // Include relationships if available and enabled
+      if (includeRelationships && r.entity?.relationships) {
+        candidate.relationships = r.entity.relationships.map(rel => ({
+          predicate: rel.predicate,
+          peer: rel.peer,
+          peer_type: rel.peer_type,
+        }));
+      }
+
+      return candidate;
+    });
 
   if (candidates.length === 0) {
     logger.info('No candidates found');
