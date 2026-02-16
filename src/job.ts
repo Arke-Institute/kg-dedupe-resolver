@@ -5,7 +5,7 @@
 import type { ArkeClient } from '@arke-institute/sdk';
 import type { KladosRequest, KladosLogger, Output } from '@arke-institute/rhiza';
 import { judgeBatch } from './judge';
-import type { Env, EntityInfo, EntityRelationship, DedupeProperties } from './types';
+import type { Env, EntityInfo, RawRelationship, DedupeProperties } from './types';
 
 /**
  * Context passed to the job processor
@@ -50,8 +50,6 @@ export async function processJob(ctx: ProcessContext): Promise<ProcessResult> {
   }
 
   const props = (request.input || {}) as DedupeProperties;
-  const includeProperties = props.include_properties !== false; // default true
-  const includeRelationships = props.include_relationships !== false; // default true
 
   // Step 1: Optional indexing delay
   const delay = props.indexing_delay_ms ?? 30000;
@@ -61,7 +59,7 @@ export async function processJob(ctx: ProcessContext): Promise<ProcessResult> {
     await sleep(actualDelay);
   }
 
-  // Step 2: Fetch source entity
+  // Step 2: Fetch source entity (full manifest)
   const { data: entity, error: entityError } = await client.api.GET('/entities/{id}', {
     params: { path: { id: entityId } },
   });
@@ -70,37 +68,21 @@ export async function processJob(ctx: ProcessContext): Promise<ProcessResult> {
     throw new Error(`Entity ${entityId} not found: ${entityError?.error || 'unknown error'}`);
   }
 
-  // Build source entity info with full context
+  // Pass through raw entity data
   const source: EntityInfo = {
     id: entity.id,
-    label: (entity.properties?.label as string) || entity.id,
     type: entity.type,
-    description: entity.properties?.description as string | undefined,
+    properties: (entity.properties || {}) as Record<string, unknown>,
+    relationships: entity.relationships as RawRelationship[] | undefined,
   };
 
-  // Include full properties if enabled
-  if (includeProperties && entity.properties) {
-    source.properties = entity.properties as Record<string, unknown>;
-  }
+  const label = (source.properties.label as string) || source.id;
+  logger.info('Processing entity', { label, type: source.type });
 
-  // Include relationships if enabled
-  if (includeRelationships && entity.relationships) {
-    source.relationships = (entity.relationships as Array<{
-      predicate: string;
-      peer: string;
-      peer_type?: string;
-    }>).map(r => ({
-      predicate: r.predicate,
-      peer: r.peer,
-      peer_type: r.peer_type,
-    }));
-  }
-
-  logger.info('Processing entity', { label: source.label, type: source.type });
-
-  // Step 3: Semantic search (top 11 to account for self, no type filter)
-  // Use expand: "full" to get complete entity data for better disambiguation
-  const searchQuery = `${source.label} ${source.description || ''}`.trim();
+  // Step 3: Semantic search (top 11 to account for self)
+  // Use expand: "full" to get complete entity manifests
+  const description = (source.properties.description as string) || '';
+  const searchQuery = `${label} ${description}`.trim();
 
   const searchResponse = await (client.api.POST as Function)('/search/entities', {
     body: {
@@ -115,43 +97,24 @@ export async function processJob(ctx: ProcessContext): Promise<ProcessResult> {
     throw new Error(`Semantic search failed: ${JSON.stringify(searchResponse.error)}`);
   }
 
-  // Step 4: Filter out self, build candidate list (max 10) with full context
+  // Step 4: Filter out self, build candidate list with full manifests
   const results = searchResponse.data?.results || [];
   const candidates: EntityInfo[] = results
     .filter((r: { id: string }) => r.id !== entityId)
     .slice(0, 10)
     .map((r: {
       id: string;
-      label: string;
       type: string;
       entity?: {
         properties?: Record<string, unknown>;
-        relationships?: Array<{ predicate: string; peer: string; peer_type?: string }>;
+        relationships?: RawRelationship[];
       };
-    }) => {
-      const candidate: EntityInfo = {
-        id: r.id,
-        label: r.label,
-        type: r.type,
-        description: r.entity?.properties?.description as string | undefined,
-      };
-
-      // Include full properties if available and enabled
-      if (includeProperties && r.entity?.properties) {
-        candidate.properties = r.entity.properties;
-      }
-
-      // Include relationships if available and enabled
-      if (includeRelationships && r.entity?.relationships) {
-        candidate.relationships = r.entity.relationships.map(rel => ({
-          predicate: rel.predicate,
-          peer: rel.peer,
-          peer_type: rel.peer_type,
-        }));
-      }
-
-      return candidate;
-    });
+    }) => ({
+      id: r.id,
+      type: r.type,
+      properties: r.entity?.properties || {},
+      relationships: r.entity?.relationships,
+    }));
 
   if (candidates.length === 0) {
     logger.info('No candidates found');
@@ -160,7 +123,7 @@ export async function processJob(ctx: ProcessContext): Promise<ProcessResult> {
 
   logger.info(`Found ${candidates.length} candidates`);
 
-  // Step 5: Single batch judge call
+  // Step 5: Single batch judge call with full entity manifests
   const result = await judgeBatch(source, candidates, env.GEMINI_API_KEY, logger);
 
   // Step 6: Filter by confidence threshold and add same_as relationships

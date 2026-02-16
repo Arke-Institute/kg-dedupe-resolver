@@ -22,6 +22,29 @@ import {
 const KLADOS_ID = 'IIKHHDFPKR744D2X78GTQE9K56';
 const API_BASE = 'https://arke-v1.arke.institute';
 
+/**
+ * Wait for relationships to be written (fire-and-forget pattern)
+ */
+async function waitForRelationships(
+  entityId: string,
+  predicate: string,
+  timeout: number = 10000
+): Promise<Array<{ predicate: string; peer: string; properties?: Record<string, unknown> }>> {
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    const entity = await getEntity(entityId);
+    const matches = (entity.relationships || []).filter(
+      (r: { predicate: string }) => r.predicate === predicate
+    );
+    if (matches.length > 0) {
+      return matches;
+    }
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  // Return empty if not found after timeout
+  return [];
+}
+
 // Test state
 let testCollectionId: string;
 let createdEntityIds: string[] = [];
@@ -178,12 +201,8 @@ describe('kg-dedupe-resolver', () => {
     assertLogCompleted(logEntity);
     log('Job completed successfully');
 
-    // Get the entity and check for same_as relationships
-    const entity = await getEntity(mobyDickId);
-    const relationships = entity.relationships || [];
-    const sameAsRelationships = relationships.filter(
-      (r: { predicate: string }) => r.predicate === 'same_as'
-    );
+    // Wait for same_as relationships to be written (fire-and-forget pattern)
+    const sameAsRelationships = await waitForRelationships(mobyDickId, 'same_as', 15000);
 
     log(`Found ${sameAsRelationships.length} same_as relationships`);
     for (const rel of sameAsRelationships) {
@@ -217,16 +236,14 @@ describe('kg-dedupe-resolver', () => {
     });
 
     const logEntity = await waitForKladosLog(result.job_collection!, {
-      timeout: 60000,
-      pollInterval: 2000,
+      timeout: 90000,
+      pollInterval: 3000,
     });
 
     assertLogCompleted(logEntity);
 
-    const entity = await getEntity(captainAhabId);
-    const sameAsRelationships = (entity.relationships || []).filter(
-      (r: { predicate: string }) => r.predicate === 'same_as'
-    );
+    // Wait for same_as relationships to be written
+    const sameAsRelationships = await waitForRelationships(captainAhabId, 'same_as', 15000);
 
     log(`Found ${sameAsRelationships.length} same_as relationships`);
 
@@ -255,6 +272,10 @@ describe('kg-dedupe-resolver', () => {
 
     assertLogCompleted(logEntity);
 
+    // For non-duplicates, just check entity directly (no relationships expected)
+    // Small delay to ensure any fire-and-forget completes
+    await new Promise((r) => setTimeout(r, 3000));
+
     const entity = await getEntity(pequodId);
     const sameAsRelationships = (entity.relationships || []).filter(
       (r: { predicate: string }) => r.predicate === 'same_as'
@@ -263,8 +284,6 @@ describe('kg-dedupe-resolver', () => {
     log(`Found ${sameAsRelationships.length} same_as relationships`);
 
     // Ship should not match whale, person, or location entities
-    // Note: This could potentially match if there's another ship, which is fine
-    // The key is it shouldn't match obviously different entity types
     expect(sameAsRelationships.length).toBeLessThanOrEqual(1);
   });
 
@@ -291,6 +310,9 @@ describe('kg-dedupe-resolver', () => {
     assertLogCompleted(logEntity);
 
     // With 0.95 threshold, may find fewer or no matches
+    // Small delay then check
+    await new Promise((r) => setTimeout(r, 3000));
+
     const entity = await getEntity(ishmaelId);
     const sameAsRelationships = (entity.relationships || []).filter(
       (r: { predicate: string }) => r.predicate === 'same_as'

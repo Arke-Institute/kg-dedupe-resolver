@@ -2,7 +2,10 @@
  * Prompts for the AI deduplication judge
  */
 
-import type { EntityInfo, EntityRelationship } from './types';
+import type { EntityInfo } from './types';
+
+// Max characters for the entire prompt payload (200k chars ≈ 50k tokens)
+const MAX_PROMPT_CHARS = 200000;
 
 /**
  * System prompt for batch duplicate detection
@@ -10,14 +13,14 @@ import type { EntityInfo, EntityRelationship } from './types';
 export const JUDGE_SYSTEM_PROMPT = `You are a deduplication judge for knowledge graph entities.
 Given a SOURCE entity and a list of CANDIDATES, identify which candidates represent the SAME real-world thing as the source.
 
-Consider:
-- Labels may differ but refer to the same thing ("Moby Dick" vs "the white whale" vs "the Whale")
+You will receive the full entity manifests as JSON. Consider all available information:
+- Labels may differ but refer to the same thing ("Moby Dick" vs "the white whale")
 - Types may differ based on extraction context ("creature" vs "character" vs "animal")
-- Properties provide semantic context (aliases, dates, attributes)
+- Properties provide semantic context (aliases, dates, attributes, etc.)
 - Relationships are critical for disambiguation:
   - Two "John Smith" entities connected to different organizations are likely different people
-  - An entity related to "Captain Ahab" is more likely to be Moby Dick related
-- Similar but distinct entities should NOT be marked as duplicates (e.g., "Captain Ahab" vs "Captain Bildad" are different captains)
+  - Shared relationships to the same entities suggest they might be the same
+- Similar but distinct entities should NOT be marked as duplicates
 
 Output JSON with ONLY the confirmed duplicates:
 {
@@ -30,86 +33,54 @@ Return an empty duplicates array if no candidates are true duplicates.
 Be conservative: if uncertain, do NOT include the candidate.`;
 
 /**
- * Format properties for display, excluding internal fields
+ * Strip internal metadata fields that don't help with deduplication
  */
-function formatProperties(properties?: Record<string, unknown>): string {
-  if (!properties) return 'None';
-
-  // Exclude label and description (shown separately) and internal fields
-  const excluded = new Set(['label', 'description', '_id', '_type', '_created', '_updated']);
-  const filtered = Object.entries(properties)
-    .filter(([key]) => !excluded.has(key) && !key.startsWith('_'))
-    .map(([key, value]) => {
-      // Truncate long values
-      const strValue = typeof value === 'string' ? value : JSON.stringify(value);
-      const displayValue = strValue.length > 100 ? strValue.slice(0, 100) + '...' : strValue;
-      return `${key}: ${displayValue}`;
-    });
-
-  return filtered.length > 0 ? filtered.join(', ') : 'None';
+function stripInternalFields(entity: EntityInfo): Record<string, unknown> {
+  return {
+    id: entity.id,
+    type: entity.type,
+    properties: entity.properties,
+    relationships: entity.relationships?.filter(r =>
+      // Keep all relationships except collection membership
+      r.predicate !== 'collection'
+    ),
+  };
 }
 
 /**
- * Format relationships for display
+ * Serialize entity to JSON, truncating if needed
  */
-function formatRelationships(relationships?: EntityRelationship[]): string {
-  if (!relationships || relationships.length === 0) return 'None';
+function serializeEntity(entity: EntityInfo, maxChars?: number): string {
+  const clean = stripInternalFields(entity);
+  let json = JSON.stringify(clean, null, 2);
 
-  // Filter out collection relationships and same_as (we're creating those)
-  const meaningful = relationships.filter(r =>
-    r.predicate !== 'collection' && r.predicate !== 'same_as'
-  );
-
-  if (meaningful.length === 0) return 'None';
-
-  return meaningful
-    .slice(0, 10) // Limit to avoid token bloat
-    .map(r => {
-      const peerInfo = r.peer_label
-        ? `${r.peer_label} (${r.peer_type || 'unknown'})`
-        : r.peer;
-      return `${r.predicate} → ${peerInfo}`;
-    })
-    .join('; ');
-}
-
-/**
- * Build entity display block with all available context
- */
-function formatEntity(entity: EntityInfo, prefix: string = ''): string {
-  const lines = [
-    `${prefix}ID: ${entity.id}`,
-    `${prefix}Label: ${entity.label}`,
-    `${prefix}Type: ${entity.type}`,
-    `${prefix}Description: ${entity.description || 'N/A'}`,
-  ];
-
-  // Add properties if available
-  if (entity.properties) {
-    lines.push(`${prefix}Properties: ${formatProperties(entity.properties)}`);
+  if (maxChars && json.length > maxChars) {
+    // Truncate and indicate it was cut
+    json = json.slice(0, maxChars - 50) + '\n... [truncated]';
   }
 
-  // Add relationships if available
-  if (entity.relationships && entity.relationships.length > 0) {
-    lines.push(`${prefix}Relationships: ${formatRelationships(entity.relationships)}`);
-  }
-
-  return lines.join('\n');
+  return json;
 }
 
 /**
- * Build the user prompt with source entity and candidates
+ * Build the user prompt with source entity and candidates as full JSON manifests
  */
 export function buildBatchJudgePrompt(source: EntityInfo, candidates: EntityInfo[]): string {
-  const candidateList = candidates.map((c, i) => {
-    return `${i + 1}. ${formatEntity(c, '   ').trimStart()}`;
-  }).join('\n\n');
+  // Rough budget: ~30% for source, ~70% for candidates
+  const sourceJson = serializeEntity(source, MAX_PROMPT_CHARS * 0.3);
 
-  return `SOURCE ENTITY:
-${formatEntity(source, '- ')}
+  // Divide remaining budget among candidates
+  const candidateBudget = Math.floor((MAX_PROMPT_CHARS * 0.6) / candidates.length);
+  const candidateJsons = candidates.map((c, i) => {
+    const json = serializeEntity(c, candidateBudget);
+    return `### Candidate ${i + 1}\n${json}`;
+  });
 
-CANDIDATES:
-${candidateList}
+  return `## SOURCE ENTITY
+${sourceJson}
+
+## CANDIDATES
+${candidateJsons.join('\n\n')}
 
 Which candidates (if any) represent the SAME real-world entity as the source?
 Return JSON with the duplicates array containing only confirmed matches.`;
