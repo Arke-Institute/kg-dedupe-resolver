@@ -71,7 +71,7 @@ export async function callGemini(
     system_instruction: { parts: [{ text: systemPrompt }] },
     contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
     generationConfig: {
-      maxOutputTokens: 2048, // Small for judge responses
+      maxOutputTokens: 4096, // Allow for detailed reasoning
       temperature: 0.3, // Lower temperature for consistent decisions
       responseMimeType: 'application/json',
     },

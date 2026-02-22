@@ -158,7 +158,7 @@ describe('kg-dedupe-resolver', () => {
       const entity = await createEntity({
         type: entityDef.type,
         properties: entityDef.properties,
-        collection: testCollectionId,
+        collectionId: testCollectionId,
       });
       createdEntityIds.push(entity.id);
       log(`Created ${key}: ${entity.id} (${entityDef.properties.label})`);
