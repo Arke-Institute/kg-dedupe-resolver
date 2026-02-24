@@ -1,14 +1,340 @@
 {
+  "schema_version": "1.0",
+
   "label": "KG Dedupe Resolver",
-  "description": "Semantic deduplication for knowledge graph entities - finds and links duplicate entities via same_as relationships",
+  "description": "Finds and links duplicate knowledge graph entities using semantic search and AI-powered comparison, adding same_as relationships for confirmed matches.",
+
+  "detailed_description": "## Overview\n\nThe KG Dedupe Resolver identifies duplicate entities within a knowledge graph collection using a two-stage approach: semantic search followed by AI-powered judgment. It receives a single entity, searches for similar entities, and uses Gemini to confirm which candidates represent the same real-world thing.\n\n## How It Works\n\n1. **Indexing Wait**: Optionally waits for Arke's search index to catch up (default 30s)\n2. **Entity Fetch**: Retrieves the source entity with full manifest (properties and relationships)\n3. **Semantic Search**: Searches for up to 10 similar entities using label + description\n4. **AI Judgment**: Sends source and candidates to Gemini for duplicate confirmation\n5. **Relationship Creation**: Adds `same_as` relationships for confirmed duplicates with confidence scores and reasoning\n6. **Passthrough**: Returns the original entity ID for downstream processing\n\n## When to Use\n\n- After KG Extractor when processing multiple documents that may mention the same entities\n- As part of scatter-kg or scatter-kg-recursive workflows\n- When merging knowledge graphs from different sources\n- Before clustering to ensure unique entities are grouped\n\n## Key Features\n\n- **Conservative matching**: Only confirms duplicates when highly confident\n- **Relationship-aware**: Uses entity relationships for disambiguation (e.g., two 'John Smith' connected to different organizations are different people)\n- **Full manifest comparison**: Compares all properties and relationships, not just labels\n- **Transparent reasoning**: Each match includes confidence score and explanation\n\n## Limitations\n\n- Requires search index to be up-to-date (use indexing_delay_ms if needed)\n- Limited to 10 candidates per entity (semantic search top results)\n- AI judgment adds latency (~5-30 seconds per entity)\n- Not idempotent: re-running will create duplicate same_as relationships",
+
   "endpoint": "https://kg-dedupe-resolver.nick-chimicles-professional.workers.dev",
   "actions_required": ["entity:view", "entity:update"],
-  "accepts": {
-    "types": ["*"],
+
+  "input": {
+    "entity": {
+      "types": ["*"],
+      "types_description": "Any entity type can be deduplicated. Works with extracted entities (person, place, organization, concept, event, etc.) from KG Extractor.",
+
+      "properties": {
+        "required": {
+          "label": {
+            "type": "string",
+            "description": "The name/label of the entity, used as the primary search query."
+          }
+        },
+        "optional": {
+          "description": {
+            "type": "string",
+            "description": "Entity description, appended to search query for better semantic matching."
+          }
+        },
+        "notes": "The deduplication uses label + description for semantic search. Entities with more detailed descriptions will have better duplicate detection."
+      },
+
+      "file": {
+        "required": false,
+        "description": "File attachments are not used by this klados."
+      },
+
+      "relationships": {
+        "required": {},
+        "optional": {
+          "any": {
+            "description": "All relationships on the entity are passed to the AI judge as context. Relationships help disambiguate entities with similar names (e.g., 'John Smith who works at Google' vs 'John Smith who works at Apple')."
+          }
+        }
+      }
+    },
+
+    "klados_input": {
+      "description": "Parameters passed via the rhiza workflow input field to customize deduplication behavior.",
+      "properties": {
+        "optional": {
+          "indexing_delay_ms": {
+            "type": "integer",
+            "description": "Milliseconds to wait for Arke search index to update before searching. Useful when entities were just created.",
+            "default": 30000,
+            "minimum": 0,
+            "maximum": 120000
+          },
+          "confidence_threshold": {
+            "type": "number",
+            "description": "Minimum confidence score (0-1) for accepting a duplicate match. Higher values are more conservative.",
+            "default": 0.7,
+            "minimum": 0,
+            "maximum": 1
+          }
+        }
+      }
+    },
+
     "cardinality": "one"
   },
-  "produces": {
-    "types": ["*"],
+
+  "output": {
+    "entities": {
+      "creates": {
+        "types": [],
+        "types_description": "This klados does not create new entities. It only adds relationships to existing entities."
+      },
+
+      "modifies": {
+        "target": "source entity",
+        "description": "The source entity is updated with same_as relationships pointing to confirmed duplicate entities.",
+        "relationships": {
+          "same_as": {
+            "target": "duplicate entities in the collection",
+            "direction": "outgoing",
+            "cardinality": "many",
+            "description": "Links to entities confirmed as representing the same real-world thing.",
+            "properties": {
+              "confidence": {
+                "type": "number",
+                "description": "Confidence score from 0 to 1 indicating how certain the match is."
+              },
+              "reasoning": {
+                "type": "string",
+                "description": "AI-generated explanation for why these entities are considered duplicates."
+              },
+              "detected_by": {
+                "type": "string",
+                "description": "Always 'kg-dedupe-resolver' for provenance tracking."
+              },
+              "detected_at": {
+                "type": "string",
+                "description": "ISO timestamp when the duplicate was detected."
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "handoff": {
+      "outputs": "The original source entity ID (passthrough)",
+      "description": "Passes the input entity ID unchanged to the next workflow step. This allows downstream kladoi (like KG Cluster) to process all entities including those with duplicate links."
+    },
+
     "cardinality": "one"
+  },
+
+  "behavior": {
+    "processing": {
+      "tier": 2,
+      "tier_description": "Durable Object based with SQL state persistence. Handles AI response latency and survives worker restarts.",
+      "typical_duration": "10-60 seconds depending on candidate count and AI response time.",
+      "idempotent": false,
+      "idempotent_description": "Re-running on the same entity will search again and may create additional same_as relationships. Use relationship queries to check existing links before re-processing."
+    },
+
+    "constraints": {
+      "candidates": {
+        "description": "Searches for up to 11 results (to account for self-match), uses top 10 non-self candidates.",
+        "limit": 10
+      },
+      "rate_limits": "Subject to Gemini API rate limits. Free tier: 60 RPM. Uses gemini-2.5-flash model.",
+      "concurrency": "Safe to run multiple instances in parallel. Each job gets its own DO instance keyed by job_id.",
+      "indexing": "Requires entities to be indexed for semantic search. Default 30s delay handles most cases."
+    },
+
+    "error_handling": {
+      "no_target_entity": {
+        "behavior": "Throws error",
+        "log_status": "error",
+        "message": "No target_entity provided"
+      },
+      "no_target_collection": {
+        "behavior": "Throws error",
+        "log_status": "error",
+        "message": "No target_collection provided"
+      },
+      "entity_not_found": {
+        "behavior": "Throws error",
+        "log_status": "error",
+        "message": "Entity {id} not found"
+      },
+      "semantic_search_failed": {
+        "behavior": "Throws error",
+        "log_status": "error",
+        "message": "Semantic search failed: {error details}"
+      },
+      "gemini_api_error": {
+        "behavior": "Retries up to 3 times with exponential backoff (5s, 10s, 20s), then fails",
+        "log_status": "error",
+        "message": "Gemini API error after retries"
+      },
+      "judge_parse_failure": {
+        "behavior": "Logs error, returns empty duplicates (continues with no matches)",
+        "log_status": "done",
+        "message": "Failed to parse judge response"
+      },
+      "no_candidates_found": {
+        "behavior": "Completes successfully with no relationships added",
+        "log_status": "done",
+        "message": "No candidates found"
+      },
+      "no_duplicates_confirmed": {
+        "behavior": "Completes successfully with no relationships added",
+        "log_status": "done",
+        "message": "No duplicates confirmed above threshold"
+      }
+    },
+
+    "side_effects": [
+      "Adds same_as relationships to source entity via /updates/additive (fire-and-forget)",
+      "Consumes Gemini API quota (1 call per entity processed)",
+      "Performs semantic search against target collection"
+    ]
+  },
+
+  "examples": [
+    {
+      "name": "Basic duplicate detection",
+      "description": "Find and link duplicate person entities extracted from different documents",
+
+      "input": {
+        "entity": {
+          "id": "ENTITY_001",
+          "type": "person",
+          "properties": {
+            "label": "Albert Einstein",
+            "description": "German-born theoretical physicist who developed the theory of relativity."
+          },
+          "relationships": [
+            { "predicate": "born_in", "peer": "ENTITY_ULM", "peer_type": "place" },
+            { "predicate": "worked_at", "peer": "ENTITY_PRINCETON", "peer_type": "organization" }
+          ]
+        },
+        "klados_input": {
+          "confidence_threshold": 0.8
+        }
+      },
+
+      "output": {
+        "relationships_added": [
+          {
+            "predicate": "same_as",
+            "peer": "ENTITY_042",
+            "properties": {
+              "confidence": 0.95,
+              "reasoning": "Both entities represent Albert Einstein. Matching attributes include: same name, both described as physicists, both connected to Princeton. Different extraction sources but clearly the same person.",
+              "detected_by": "kg-dedupe-resolver",
+              "detected_at": "2025-01-15T10:30:00.000Z"
+            }
+          }
+        ],
+        "handoff_outputs": ["ENTITY_001"]
+      },
+
+      "notes": "The source entity remains unchanged except for new same_as relationships. The AI judge considered relationships (born_in, worked_at) for disambiguation."
+    },
+    {
+      "name": "No duplicates found",
+      "description": "Processing a unique entity with no duplicates in the collection",
+
+      "input": {
+        "entity": {
+          "id": "ENTITY_XYZ",
+          "type": "place",
+          "properties": {
+            "label": "Atlantis",
+            "description": "Mythical underwater city mentioned in ancient texts."
+          }
+        },
+        "klados_input": {}
+      },
+
+      "output": {
+        "relationships_added": [],
+        "handoff_outputs": ["ENTITY_XYZ"],
+        "log_messages": [
+          "Processing entity: Atlantis (place)",
+          "Found 3 candidates",
+          "Judge response: tokens=450, cost=$0.00012, candidates=3",
+          "No duplicates confirmed above threshold",
+          "Job completed"
+        ]
+      },
+
+      "notes": "Even though candidates were found via semantic search, the AI judge determined none were true duplicates. This is the expected behavior for unique entities."
+    },
+    {
+      "name": "Disambiguation via relationships",
+      "description": "Two entities with same label but different contexts are not marked as duplicates",
+
+      "input": {
+        "entity": {
+          "id": "ENTITY_JS1",
+          "type": "person",
+          "properties": {
+            "label": "John Smith",
+            "description": "Software engineer at Google."
+          },
+          "relationships": [
+            { "predicate": "works_at", "peer": "ENTITY_GOOGLE", "peer_type": "organization" }
+          ]
+        },
+        "klados_input": {}
+      },
+
+      "output": {
+        "relationships_added": [],
+        "handoff_outputs": ["ENTITY_JS1"],
+        "log_messages": [
+          "Processing entity: John Smith (person)",
+          "Found 5 candidates",
+          "Judge response: tokens=820, cost=$0.00025, candidates=5",
+          "No duplicates confirmed above threshold",
+          "Job completed"
+        ]
+      },
+
+      "notes": "Semantic search found other 'John Smith' entities, but the AI judge determined they are different people based on relationship context (different employers, different roles, etc.)."
+    }
+  ],
+
+  "metadata": {
+    "version": "1.0.0",
+    "author": "Arke Institute",
+
+    "tags": ["knowledge-graph", "deduplication", "semantic-search", "gemini", "relationships", "tier-2"],
+
+    "related_kladoi": {
+      "prerequisites": [
+        {
+          "label": "KG Extractor",
+          "description": "Extracts entities from text to build the knowledge graph.",
+          "when": "Before deduplication, entities must exist in the collection."
+        }
+      ],
+      "often_used_with": [
+        {
+          "label": "KG Cluster",
+          "description": "Groups semantically similar entities into clusters.",
+          "when": "After deduplication to organize entities into a hierarchy."
+        },
+        {
+          "label": "Describe",
+          "description": "Enhances or regenerates entity descriptions.",
+          "when": "After clustering to create cluster summaries."
+        }
+      ],
+      "workflows": [
+        {
+          "label": "scatter-kg",
+          "description": "Full extraction pipeline: scatter -> extract -> dedupe -> cluster -> describe"
+        },
+        {
+          "label": "scatter-kg-recursive",
+          "description": "Recursive clustering variant that builds a hierarchy of clusters"
+        }
+      ]
+    },
+
+    "costs": {
+      "api_calls": "1 Gemini API call per entity processed",
+      "model": "gemini-2.5-flash",
+      "typical_tokens": "Input: 1000-5000 tokens (entity manifests), Output: 100-500 tokens (duplicates JSON)",
+      "estimated_cost": "$0.0001-0.001 per entity depending on manifest sizes"
+    }
   }
 }
