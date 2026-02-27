@@ -10,7 +10,7 @@
  */
 
 import { Hono } from 'hono';
-import type { KladosRequest, KladosResponse } from '@arke-institute/rhiza';
+import { getKladosConfig, type KladosRequest, type KladosResponse } from '@arke-institute/rhiza';
 import { KladosJobDO } from './job-do';
 import type { Env } from './types';
 
@@ -51,6 +51,9 @@ app.get('/.well-known/arke-verification', (c) => {
 app.post('/process', async (c) => {
   const req = await c.req.json<KladosRequest>();
 
+  // Get network-aware config (uses AGENT_ID_TEST/MAIN and ARKE_AGENT_KEY_TEST/MAIN)
+  const config = getKladosConfig(c.env, req.network);
+
   // Get DO instance by job_id
   const doId = c.env.KLADOS_JOB.idFromName(req.job_id);
   const doStub = c.env.KLADOS_JOB.get(doId);
@@ -62,11 +65,7 @@ app.post('/process', async (c) => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         request: req,
-        config: {
-          agentId: c.env.AGENT_ID,
-          agentVersion: c.env.AGENT_VERSION,
-          authToken: c.env.ARKE_AGENT_KEY,
-        },
+        config,
       }),
     })
   );

@@ -11,6 +11,7 @@ dist/
 # Environment
 .env
 .env.*
+.secrets.json
 
 # State files (contain secrets)
 .klados-state.json
