@@ -4,6 +4,11 @@
   "label": "KG Dedupe Resolver",
   "description": "Finds and links duplicate knowledge graph entities using semantic search and AI-powered comparison, adding same_as relationships for confirmed matches.",
 
+  "match": {
+    "path": "properties.label",
+    "exists": true
+  },
+
   "detailed_description": "## Overview\n\nThe KG Dedupe Resolver identifies duplicate entities within a knowledge graph collection using a two-stage approach: semantic search followed by AI-powered judgment. It receives a single entity, searches for similar entities, and uses Gemini to confirm which candidates represent the same real-world thing.\n\n## How It Works\n\n1. **Indexing Wait**: Optionally waits for Arke's search index to catch up (default 30s)\n2. **Entity Fetch**: Retrieves the source entity with full manifest (properties and relationships)\n3. **Semantic Search**: Searches for up to 10 similar entities using label + description\n4. **AI Judgment**: Sends source and candidates to Gemini for duplicate confirmation\n5. **Relationship Creation**: Adds `same_as` relationships for confirmed duplicates with confidence scores and reasoning\n6. **Passthrough**: Returns the original entity ID for downstream processing\n\n## When to Use\n\n- After KG Extractor when processing multiple documents that may mention the same entities\n- As part of scatter-kg or scatter-kg-recursive workflows\n- When merging knowledge graphs from different sources\n- Before clustering to ensure unique entities are grouped\n\n## Key Features\n\n- **Conservative matching**: Only confirms duplicates when highly confident\n- **Relationship-aware**: Uses entity relationships for disambiguation (e.g., two 'John Smith' connected to different organizations are different people)\n- **Full manifest comparison**: Compares all properties and relationships, not just labels\n- **Transparent reasoning**: Each match includes confidence score and explanation\n\n## Limitations\n\n- Requires search index to be up-to-date (use indexing_delay_ms if needed)\n- Limited to 10 candidates per entity (semantic search top results)\n- AI judgment adds latency (~5-30 seconds per entity)\n- Not idempotent: re-running will create duplicate same_as relationships",
 
   "endpoint": "https://kg-dedupe-resolver.nick-chimicles-professional.workers.dev",
