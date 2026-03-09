@@ -2,8 +2,7 @@
  * Core deduplication job logic
  */
 
-import type { ArkeClient } from '@arke-institute/sdk';
-import type { KladosRequest, KladosLogger, Output } from '@arke-institute/rhiza';
+import type { KladosJob, Output } from '@arke-institute/rhiza';
 import { judgeBatch } from './judge';
 import type { Env, EntityInfo, RawRelationship, DedupeProperties } from './types';
 
@@ -11,9 +10,8 @@ import type { Env, EntityInfo, RawRelationship, DedupeProperties } from './types
  * Context passed to the job processor
  */
 export interface ProcessContext {
-  request: KladosRequest;
-  client: ArkeClient;
-  logger: KladosLogger;
+  /** KladosJob instance (provides client, logger, request, fetchTarget, etc.) */
+  job: KladosJob;
   sql: SqlStorage;
   env: Env;
 }
@@ -37,7 +35,8 @@ function sleep(ms: number): Promise<void> {
  * Process a dedupe job for a single entity
  */
 export async function processJob(ctx: ProcessContext): Promise<ProcessResult> {
-  const { request, client, logger, env } = ctx;
+  const { job, env } = ctx;
+  const { request, client, log: logger } = job;
   const entityId = request.target_entity;
   const collectionId = request.target_collection;
 
