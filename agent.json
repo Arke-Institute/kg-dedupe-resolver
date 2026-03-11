@@ -51,23 +51,23 @@
     },
 
     "klados_input": {
-      "description": "Parameters passed via the rhiza workflow input field to customize deduplication behavior.",
+      "description": "Parameters passed via the rhiza workflow input field to customize deduplication behavior. Properties map directly to keys in request.input.",
       "properties": {
-        "optional": {
-          "indexing_delay_ms": {
-            "type": "integer",
-            "description": "Milliseconds to wait for Arke search index to update before searching. Useful when entities were just created.",
-            "default": 30000,
-            "minimum": 0,
-            "maximum": 120000
-          },
-          "confidence_threshold": {
-            "type": "number",
-            "description": "Minimum confidence score (0-1) for accepting a duplicate match. Higher values are more conservative.",
-            "default": 0.7,
-            "minimum": 0,
-            "maximum": 1
-          }
+        "indexing_delay_ms": {
+          "type": "integer",
+          "required": false,
+          "description": "Milliseconds to wait for Arke search index to update before searching. Useful when entities were just created.",
+          "default": 30000,
+          "minimum": 0,
+          "maximum": 120000
+        },
+        "confidence_threshold": {
+          "type": "number",
+          "required": false,
+          "description": "Minimum confidence score (0-1) for accepting a duplicate match. Higher values are more conservative.",
+          "default": 0.7,
+          "minimum": 0,
+          "maximum": 1
         }
       }
     },
